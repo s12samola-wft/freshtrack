@@ -1,0 +1,3 @@
+# Extra packages for testing only. Never installed in the production image.
+-r requirements.in
+pytest==9.1.1

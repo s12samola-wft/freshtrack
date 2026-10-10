@@ -1,0 +1,28 @@
+# --- Secrets: must never be committed ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+kubeconfig*
+*.tfstate
+*.tfstate.*
+
+# --- Python leftovers ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- Tool caches and reports ---
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# --- Editor and OS clutter ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

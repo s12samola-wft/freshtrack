@@ -32,8 +32,10 @@ and lets me practise DevOps, Kubernetes and SRE end to end.
 - Tool check: Git 2.43, Python 3.12.3 and gh 2.45 are present. `docker --version`
   returned nothing, and minikube, kubectl and helm are not installed. To fix in a later step.
 
-**Lesson** *(Samson: write this in your own words)*
--
+**Lesson**
+- Write the plan down before building: an honest architecture doc (Planned vs Built) and a journal
+  make every decision traceable, like batch records in food production.
+- `.gitignore` is a safety net, not a lock. If a secret is ever committed, rotate it first, then clean history.
 
 **Next step**
 - Review `docs/architecture.md` and settle the open decisions.
@@ -73,9 +75,74 @@ Every app must expose `/health` (liveness) and `/ready` (readiness, checks the d
 - Verify: 4 passed.
 - Side note: `gh` CLI login is invalid (HTTP 401). Pushing works over SSH. Re-login is needed before using `gh pr create`.
 
-**Lesson** *(Samson: write this in your own words)*
--
+**Lesson**
+- Liveness (`/health`) answers "should Kubernetes restart me?"; readiness (`/ready`) answers
+  "can I serve traffic now?". Putting a database check in liveness causes restart loops
+  (CrashLoopBackOff) during a database outage, and restarts cannot fix the database.
+- To predict which test breaks, ask: which tests call the code I changed?
 
 **Next step**
 - Open the pull request for `feat/api-skeleton` (do not merge until CI exists).
 - Samson builds the CI pipeline: Check → Build → Prove → Scan → Ship, starting with lint + test.
+
+---
+
+## Entry 3 — 2026-10-10 — CI check stage (lint ∥ test)
+
+**Problem**
+There was no CI. PR #1 (api skeleton) was merged after local tests only, so nothing
+automatically stopped broken or messy code from reaching `main`.
+
+**Decision**
+- Start the pipeline with stage 1 of Check → Build → Prove → Scan → Ship: `lint` and `test` as two parallel jobs.
+- Triggers: `pull_request` and `push` to `main` only. Pushing a feature branch alone does not run CI;
+  open a (draft) PR for early feedback. This avoids running CI twice for the same commit.
+- Least privilege: `permissions: contents: read`, `persist-credentials: false`.
+- Fixed runner `ubuntu-24.04`, `timeout-minutes: 5`, `concurrency` with `cancel-in-progress`.
+- Actions pinned to full commit SHAs, verified on 2026-10-10 with the GitHub releases API and `git ls-remote`:
+  `actions/checkout` v7.0.1 = `3d3c42e5aac5ba805825da76410c181273ba90b1`,
+  `actions/setup-python` v7.0.0 = `5fda3b95a4ea91299a34e894583c3862153e4b97`.
+- Ruff 0.17.0 (latest on PyPI on 2026-10-10), same version locally and in CI.
+
+**Implementation**
+- Branch `ci/check-stage`, file `.github/workflows/ci.yml` (typed by me, with a comment per stage).
+- Ruff installed in `api/.venv` to reproduce CI locally.
+
+**Verification**
+- First CI run: `test` passed; `lint` failed at `ruff check` (see Troubleshooting).
+- Locally after the fix: `ruff check api/` → All checks passed; `ruff format --check api/` → 3 files
+  already formatted; `pytest` → 4 passed.
+- Second CI run on commit `fea1ee9`: *pending, to be recorded.*
+
+**Troubleshooting**
+
+1. *`git add` did nothing; `git status` showed `../.github/`.*
+   - Why: I ran Git from inside `api/`. Git paths are relative to the current folder, so
+     `.github/workflows/ci.yml` pointed to a file that does not exist there.
+   - Fix: `cd ~/Projects/freshtrack` (or `cd "$(git rev-parse --show-toplevel)"`), then `git add`.
+
+2. *CI lint failed: `I001 Import block is un-sorted or un-formatted` in `api/tests/test_health.py`.*
+   - Why: the test file was written without running Ruff first. CI caught what the author missed.
+   - Fix: reproduced locally with the same Ruff version, then `ruff check --fix api/`.
+
+3. *Hidden problems: the `ruff format --check` step was skipped.*
+   - Why: steps in a job run in order and stop at the first failure. Jobs are independent, so `test` still passed.
+   - Running `ruff format --check` locally showed 2 more problems: a line longer than 88 characters
+     in the test file, and an extra blank line in `api/app.py` left over from the Entry 2 failure drill.
+   - Fix: `ruff format api/`, reviewed with `git diff`, re-ran lint and tests.
+   - Possible improvement: `if: ${{ !cancelled() }}` on the format step, so one CI run shows all lint problems.
+
+4. *History note:* commit `209fbb8` ("add") accidentally added a stray `..` line to `ci.yml`, removed
+   again in `3fa88a8`. Squash-merging the PR will combine these into one clean commit on `main`.
+
+**Lesson**
+- CI is the quality-control gate, not a formality: it caught 3 issues that both the author and I missed.
+- Reproduce a CI failure locally with the same tool version before fixing it; fix, review the diff, re-verify, then push.
+- A failed step hides the steps after it, so "1 error" in CI can mean more problems underneath.
+- Manual fixes after an incident (the drill) can leave small leftovers; automated checks find them.
+- Clear commit messages matter: "add" tells a reviewer nothing.
+
+**Next step**
+- Record the result of the second CI run, then squash-merge the PR once it is green.
+- Decide on `!cancelled()` for the format step.
+- Add the Trivy repo scan (secrets, vulnerable dependencies, misconfiguration) to the CHECK stage.

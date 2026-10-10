@@ -30,8 +30,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      # Wheels only: never run a package's build script on the CI runner.
-      - run: "pip install --only-binary :all: ruff==0.17.0"
+          cache: pip # reuse downloaded packages between runs
+          cache-dependency-path: api/requirements-dev.txt
+      # Locked install: exact versions, wheels only, every file checked against its hash.
+      - run: "pip install --only-binary :all: --require-hashes -r api/requirements-dev.txt"
       # Find code errors (unused imports, undefined names, ...).
       - run: ruff check api/
       # Fail if any file is not formatted; changes nothing.
@@ -52,6 +54,6 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip # reuse downloaded packages between runs
-          cache-dependency-path: api/requirements-dev.in
-      - run: "pip install --only-binary :all: -r requirements-dev.in"
+          cache-dependency-path: api/requirements-dev.txt
+      - run: "pip install --only-binary :all: --require-hashes -r requirements-dev.txt"
       - run: pytest -v

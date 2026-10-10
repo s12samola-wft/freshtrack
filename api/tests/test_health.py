@@ -1,11 +1,12 @@
-import pytest
-
 import app as api_module
+import pytest
 
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@db.invalid:5432/freshtrack")
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql://user:pass@db.invalid:5432/freshtrack"
+    )
     return api_module.create_app().test_client()
 
 

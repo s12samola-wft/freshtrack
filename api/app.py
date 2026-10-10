@@ -34,7 +34,6 @@ def create_app():
         # otherwise a database outage would make Kubernetes restart healthy api Pods.
         return jsonify(status="ok"), 200
 
-
     @app.get("/ready")
     def ready():
         # Readiness: only accept traffic when the database is reachable.

@@ -4,3 +4,5 @@
 -c requirements.txt
 pytest==9.1.1
 ruff==0.17.0
+# Security scanner for the CI scan step.
+bandit==1.9.4

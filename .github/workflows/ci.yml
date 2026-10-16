@@ -1,59 +1,65 @@
-# FreshTrack CI pipeline: Check -> Build -> Prove -> Scan -> Ship
-# This file currently covers stage 1 (CHECK): lint and test run in parallel.
+# FreshTrack CI: checks the code before any image is built.
+# One job, steps run top to bottom: CHECK -> TEST -> SCAN.
+# If a step fails, the steps after it are skipped and the run goes red.
 name: CI
 
-# When to run: on every pull request, and again after a merge to main.
+# When to run: on every pull request, and after each merge to main.
 on:
   pull_request:
   push:
     branches: [main]
 
-# Least privilege: the pipeline can only read the repo, never write to it.
+# The workflow's token can read the repo but never change it.
 permissions:
   contents: read
 
-# If a newer commit is pushed to the same branch, cancel the older run.
+# A new push to a pull request cancels its older run. Runs on main are never cancelled.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # CHECK (1/2): lint - is the code written cleanly and formatted consistently?
-  lint:
+  checks:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      # Download the repo code. Actions are pinned to a full commit SHA (verified against the tag).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false # don't leave a Git token on the runner
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          cache: pip # reuse downloaded packages between runs
-          cache-dependency-path: api/requirements-dev.txt
-      # Locked install: exact versions, wheels only, every file checked against its hash.
-      - run: "pip install --only-binary :all: --require-hashes -r api/requirements-dev.txt"
-      # Find code errors (unused imports, undefined names, ...).
-      - run: ruff check api/
-      # Fail if any file is not formatted; changes nothing.
-      - run: ruff format --check api/
-
-  # CHECK (2/2): test - does the code do what it should?
-  test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    defaults:
-      run:
-        working-directory: api
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Download the code without leaving a Git token on the runner.
+      - name: Get the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+
+      # Install Python 3.12.
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-          cache: pip # reuse downloaded packages between runs
-          cache-dependency-path: api/requirements-dev.txt
-      - run: "pip install --only-binary :all: --require-hashes -r requirements-dev.txt"
-      - run: pytest -v
+
+      # Locked install: ready-made wheels only, every file checked against its hash.
+      - name: Install our tools (locked)
+        run: "pip install --only-binary :all: --require-hashes -r api/requirements-dev.txt"
+
+      # 1. CHECK - is the code clean?
+      - name: Lint
+        run: ruff check api/
+
+      - name: Format check
+        run: ruff format --check api/
+
+      # 2. TEST - does the code work?
+      - name: Unit tests
+        working-directory: api
+        run: pytest -v
+
+      # 3. SCAN - is it safe?
+      # bandit: risky patterns in our own Python code (tests skipped: they use assert on purpose).
+      - name: Scan our code (bandit)
+        run: bandit -r api/ -x api/tests
+
+      # Trivy: known vulnerabilities in our packages + secrets left in our files.
+      # Official image pinned by digest; our code is mounted read-only.
+      - name: Scan packages and secrets (Trivy)
+        run: >-
+          docker run --rm -v "$PWD:/src:ro"
+          ghcr.io/aquasecurity/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+          fs --scanners vuln,secret --exit-code 1 /src

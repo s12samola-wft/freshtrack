@@ -63,3 +63,15 @@ jobs:
           docker run --rm -v "$PWD:/src:ro"
           ghcr.io/aquasecurity/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
           fs --scanners vuln,secret --exit-code 1 /src
+      # 4. BUILD - cook the image. Tagged with the commit SHA, so every image traces back to its exact code.
+      - name: Build the api image
+        run: docker build -t "freshtrack-api:$GITHUB_SHA" api/
+
+      # 5. PROVE - start the image and check it answers /health, like the local test.
+      # curl retries for up to about 10 seconds while gunicorn starts; --fail turns an HTTP error into a red step.
+      - name: Prove the image starts (/health)
+        run: |
+          docker run -d --name ft-api -p 8000:8000 "freshtrack-api:$GITHUB_SHA"
+          curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 http://localhost:8000/health
+          docker logs ft-api
+           

@@ -1,5 +1,5 @@
 # FreshTrack CI: checks the code, then builds the api image, proves it starts and scans it.
-# One job, steps run top to bottom: CHECK -> TEST -> SCAN.
+# One job, steps run top to bottom: CHECK -> TEST -> SCAN -> BUILD -> PROVE -> SCAN IMAGE.
 # If a step fails, the steps after it are skipped and the run goes red.
 name: CI
 

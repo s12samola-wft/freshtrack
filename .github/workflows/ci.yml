@@ -68,10 +68,14 @@ jobs:
         run: docker build -t "freshtrack-api:$GITHUB_SHA" api/
 
       # 5. PROVE - start the image and check it answers /health, like the local test.
-      # curl retries for up to about 10 seconds while gunicorn starts; --fail turns an HTTP error into a red step.
+      # gunicorn needs a moment to start; curl retries every second (up to 10 times) on any error.
+      # --fail turns an HTTP error into a red step.
       - name: Prove the image starts (/health)
         run: |
           docker run -d --name ft-api -p 8000:8000 "freshtrack-api:$GITHUB_SHA"
-          curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 http://localhost:8000/health
-          docker logs ft-api
-           
+          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 1 http://localhost:8000/health
+
+      # Always print the container's logs, even when a step above failed, so we can see why.
+      - name: Show container logs
+        if: always()
+        run: docker logs ft-api

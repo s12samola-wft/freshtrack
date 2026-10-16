@@ -1,5 +1,5 @@
-# FreshTrack CI: checks the code before any image is built.
-# One job, steps run top to bottom: CHECK -> TEST -> SCAN.
+# FreshTrack CI: checks the code, then builds the api image, proves it starts and scans it.
+# One job, steps run top to bottom: CHECK -> TEST -> SCAN -> BUILD -> PROVE -> SCAN IMAGE.
 # If a step fails, the steps after it are skipped and the run goes red.
 name: CI
 
@@ -63,3 +63,45 @@ jobs:
           docker run --rm -v "$PWD:/src:ro"
           ghcr.io/aquasecurity/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
           fs --scanners vuln,secret --exit-code 1 /src
+
+      # 4. BUILD - cook the image. Tagged with the commit SHA, so every image traces back to its exact code.
+      - name: Build the api image
+        run: docker build -t "freshtrack-api:$GITHUB_SHA" api/
+
+      # 5. PROVE - start the image and check it answers /health, like the local test.
+      # gunicorn needs a moment to start; curl retries every second (up to 10 times) on any error.
+      # --fail turns an HTTP error into a red step.
+      - name: Prove the image starts (/health)
+        run: |
+          docker run -d --name ft-api -p 8000:8000 "freshtrack-api:$GITHUB_SHA"
+          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 1 http://localhost:8000/health
+
+      # 6. SCAN THE IMAGE - check the finished image: Debian base + Python + our packages.
+      # Save the image to a file, so Trivy can read it without access to the Docker socket.
+      - name: Save the image to a file
+        run: docker save "freshtrack-api:$GITHUB_SHA" -o "$RUNNER_TEMP/image.tar"
+
+      # Report: list every problem at every severity. Never fails the run.
+      - name: Scan the image - full report (Trivy)
+        run: >-
+          docker run --rm
+          -v "$RUNNER_TEMP/image.tar:/image.tar:ro"
+          -v "$RUNNER_TEMP/trivy-cache:/cache"
+          ghcr.io/aquasecurity/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+          image --cache-dir /cache --scanners vuln,secret --input /image.tar
+
+      # Gate: fail only on HIGH or CRITICAL problems that already have a fix.
+      # Reuses the database downloaded by the report step.
+      - name: Scan the image - gate (Trivy)
+        run: >-
+          docker run --rm
+          -v "$RUNNER_TEMP/image.tar:/image.tar:ro"
+          -v "$RUNNER_TEMP/trivy-cache:/cache"
+          ghcr.io/aquasecurity/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+          image --cache-dir /cache --skip-db-update --scanners vuln,secret
+          --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --input /image.tar
+
+      # Always print the container's logs, even when a step above failed, so we can see why.
+      - name: Show container logs
+        if: always()
+        run: docker logs ft-api

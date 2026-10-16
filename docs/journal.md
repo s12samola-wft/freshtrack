@@ -262,3 +262,96 @@ automatically stopped broken or messy code from reaching `main`.
 - Still owed: failure drills for this pipeline (Predict → Break → Observe → Fix → Verify):
   Ruff, pytest, bandit, Trivy secret. Deferred so we can start the BUILD stage.
 - Next: the BUILD stage, starting with the Dockerfile for the api.
+
+## Entry 5 — 2026-10-16 — BUILD stage: hardened api image, built, proven and scanned in CI
+
+**Problem**
+- The api had no Docker image, so there was nothing to deploy to Kubernetes later.
+- The CHECK stage's Trivy `fs` scan only reads `api/requirements.txt`. It cannot see what the base
+  image adds (Debian packages, the Python interpreter, Python's own tools), yet all of that ships.
+
+**Decision**
+- Single-stage Dockerfile. Multi-stage was considered, but every package installs as a ready-made wheel,
+  so there is nothing to compile and no build tools to leave behind.
+- Base: `python:3.12.15-slim-trixie`, pinned by digest (`sha256:a6e34c59…11b1`, checked on Docker Hub 2026-10-16;
+  the tag was last updated 2026-10-09, so it respects the release cooldown).
+- Same locked install as CI (`--only-binary :all: --require-hashes`), no pip cache in the image.
+- Runs as a numeric non-root user (uid 10001, no home, no login shell), so Kubernetes can enforce `runAsNonRoot` later.
+- gunicorn with `--no-control-socket`: Kubernetes manages the process, so gunicorn's admin socket is not needed
+  (less attack surface, and it fixed the error in Troubleshooting 1).
+- CI (same single job, after the CHECK steps): BUILD (tag = commit SHA) → PROVE (start the container, call `/health`)
+  → SCAN IMAGE. Kept in one job: the image built in one step is still there for the next steps.
+- Image scan with the same pinned Trivy 0.75.0 image:
+  - `docker save` the image to a tar file and give it to Trivy read-only (`--input`), so Trivy never gets
+    the Docker socket (which is root-level control of the runner).
+  - Report step: every severity, never fails. Gate step: `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`,
+    scanners `vuln,secret`.
+  - A shared cache folder (`--cache-dir`): the report step downloads the vulnerability database,
+    the gate reuses it (`--skip-db-update`).
+  - Flags checked in Trivy's own docs at tag `v0.75.0` (the `trivy.dev/latest` pages showed older docs, around v0.67).
+  - Stayed on 0.75.0: 0.76.0 was released 2026-10-14, only 2 days earlier (release cooldown).
+
+**Implementation**
+- Branch `build/api-image`, PR #7, squash-merged as `83024f7`.
+- `api/Dockerfile` and `api/.dockerignore`.
+- `.github/workflows/ci.yml`: steps "Build the api image", "Prove the image starts (/health)",
+  "Save the image to a file", "Scan the image - full report (Trivy)", "Scan the image - gate (Trivy)",
+  and "Show container logs" (`if: always()`). Header comment updated to list every stage.
+
+**Verification**
+- Local: image 216 MB; `/health` → 200; `/ready` → 503 without `DATABASE_URL` (expected: no database);
+  `id` inside the container → uid 10001.
+- CI run `38953043940` (image scan added): all steps green, job about 40 s. Report step 8 s, gate 1 s
+  (the gate reused the cached database). Debian 13.7 (87 packages): 0 vulnerabilities; every Python package: 0.
+- Run `38961064042` (header update) green. After the merge, run `38961293971` (`push` to `main`) green.
+
+**Failure drill: the recalled base image** (Predict → Break → Observe → Fix → Verify)
+- Break: on a throwaway branch `drill/old-base-image`, `FROM` changed to `python:3.12.1-slim-bookworm`
+  (digest `sha256:a64ac5be…573e`, from 2024). `requirements.txt` unchanged.
+- Predict (all correct): fs scan passes, build passes, `/health` passes, report runs, gate fails, logs are shown.
+  Refined reasons: the fs scan passes because it only reads `requirements.txt`; the gate fails because of
+  fixable HIGH vulnerabilities, not just because the image is old.
+- Observe (run `38955673523`): every step green except the gate.
+  - Full report: Debian 12.4 = 557 findings; pip 23.2.1 = 7; setuptools 69.0.3 = 3; wheel 0.42.0 = 1.
+    setuptools and wheel are not in our requirements at all: they came with the old base image.
+  - Gate, Python packages: setuptools CVE-2024-6345 (fixed in 70.0.0) and CVE-2025-47273 (fixed in 78.1.1),
+    wheel CVE-2026-24049 (fixed in 0.46.2), all HIGH.
+  - Debian HIGH rows with a fix were also seen, for example glibc (`libc-bin`) CVE-2024-2961 and
+    xz (`liblzma5`) CVE-2025-31115. The gate's Debian count was not recorded.
+- Fix: back to `build/api-image` (the good `FROM` line was never changed there); drill branch deleted
+  locally and on GitHub, never merged.
+- Verify: back on the trixie digest; run #25 on `build/api-image` was already green.
+- Explain-back: the gate counted those rows because they were HIGH severity and a fix already existed.
+  The other ~565 were removed by two filters: most were LOW or MEDIUM (`--severity`), and the remaining
+  HIGH/CRITICAL ones had no fix yet (`--ignore-unfixed`). The full report still lists them all.
+
+**Troubleshooting**
+1. *gunicorn: "Control server error: Permission denied: '/home/freshtrack'".*
+   - gunicorn 26 (since 25.1) opens a control socket in `$HOME/.gunicorn`, and our user has no home folder.
+   - Fix: `--no-control-socket`.
+2. *First CI PROVE run failed in 0 seconds (run `38859526216`): curl error 56, connection reset.*
+   - curl called before gunicorn was listening, and `--retry-connrefused` does not retry error 56.
+   - Fix: `--retry-all-errors` (up to 10 tries, 1 s apart; about 1 was needed), plus a separate
+     "Show container logs" step that always runs. Run `38860539500` green.
+3. *Docker cache predictions.* I confused pip's download cache with Docker's layer cache. A change to `CMD` only
+   rebuilds nothing heavy: `CMD` is metadata, so every layer came from the cache.
+4. *After pushing the drill branch, GitHub offered "Compare & pull request".* That is only an offer;
+   no PR existed (checked: 0 PRs for the branch). The CI run came from the `push` trigger.
+5. *The Dockerfile was not visible under `api/` on GitHub.* GitHub shows `main` by default, and the Dockerfile
+   lived only on `build/api-image` until PR #7 was merged. After the merge it was on `main`.
+
+**Lesson**
+- "It runs" is not "it is safe": in the drill, lint, tests, the build and `/health` were all green,
+  yet the image carried fixable HIGH vulnerabilities. Only the image scan saw them.
+- I scan the finished image, not just my recipe card: the base image brings packages I never asked for.
+- A gate should block only what I can fix (fixable HIGH/CRITICAL), and a full report keeps the rest visible.
+  Ignored is not gone: unfixed problems still ship, so they need a regular re-scan and a rebuild when a fix appears.
+- An old base image is old flour: same recipe, 557 more findings. Keep the base pinned and refreshed.
+- Give a scanner only what it needs: a read-only tar file, not the Docker socket.
+- A branch is a separate test kitchen; GitHub's homepage shows `main`. A PR exists only when someone opens it.
+
+**Next step**
+- Done: `docs/architecture.md` section 9 updated (BUILD, PROVE, SCAN marked Built for the api).
+- SHIP: push the image to Docker Hub tagged with the git SHA, only on `main`, token as a GitHub secret.
+- Later: a weekly scheduled re-scan, so new fixes are noticed without a code push.
+- Still owed: CHECK-stage drills (Ruff, pytest, bandit, Trivy secret). Later todo: gunicorn access logs.

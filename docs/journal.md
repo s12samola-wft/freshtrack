@@ -112,7 +112,10 @@ automatically stopped broken or messy code from reaching `main`.
 - First CI run: `test` passed; `lint` failed at `ruff check` (see Troubleshooting).
 - Locally after the fix: `ruff check api/` → All checks passed; `ruff format --check api/` → 3 files
   already formatted; `pytest` → 4 passed.
-- Second CI run on commit `fea1ee9`: *pending, to be recorded.*
+- PR #2 was merged on 2026-10-10, but the workflow file was invalid, so lint and test never ran
+  (see Troubleshooting 6).
+- After the fix in PR #3, CI was green on the PR (run `38034944465`) and on `main` after the merge
+  (run `38035053448`, commit `6f6db79`).
 
 **Troubleshooting**
 
@@ -135,14 +138,112 @@ automatically stopped broken or messy code from reaching `main`.
 4. *History note:* commit `209fbb8` ("add") accidentally added a stray `..` line to `ci.yml`, removed
    again in `3fa88a8`. Squash-merging the PR will combine these into one clean commit on `main`.
 
+5. *SonarCloud quality gate failed: security hotspot on `pip install` without `--only-binary`.*
+   - Why: a source package (sdist) runs its own build scripts during install, so it can execute code on the runner.
+   - Fix: `pip install --only-binary :all:` (ready-made wheels only), fixed in code rather than marked "Safe".
+
+6. *An invalid workflow was merged to `main`, and lint and test never ran.*
+   - Why: a step was missing its `- ` before `run:`, and YAML read the `: ` inside `:all: ruff` as a key/value pair.
+     GitHub could not read the file, so each push only showed a failed run named after the file path
+     (`.github/workflows/ci.yml`) instead of `CI`, and no job started.
+   - Fix (PR #3): split the pip step into its own `- run:` and quoted the commands.
+
+7. *SonarCloud quality gate failed: security hotspot on installing from unlocked requirements.*
+   - Why: without exact versions and hashes, every install can pick up a different (or tampered) package.
+   - Fix: `pip-compile` 7.6.1 with `--generate-hashes --strip-extras` creates `requirements*.txt` from the
+     `.in` files; CI installs with `--require-hashes`.
+   - Note: SonarCloud runs through Automatic Analysis (its GitHub app), not as a step in `ci.yml`.
+
 **Lesson**
 - CI is the quality-control gate, not a formality: it caught 3 issues that both the author and I missed.
 - Reproduce a CI failure locally with the same tool version before fixing it; fix, review the diff, re-verify, then push.
 - A failed step hides the steps after it, so "1 error" in CI can mean more problems underneath.
 - Manual fixes after an incident (the drill) can leave small leftovers; automated checks find them.
 - Clear commit messages matter: "add" tells a reviewer nothing.
+- No green is not the same as passed: before merging, I check that the jobs actually ran.
 
 **Next step**
 - Record the result of the second CI run, then squash-merge the PR once it is green.
 - Decide on `!cancelled()` for the format step.
 - Add the Trivy repo scan (secrets, vulnerable dependencies, misconfiguration) to the CHECK stage.
+
+---
+
+## Entry 4 — 2026-10-16 — Simpler CI: one job with security scans before the build
+
+**Problem**
+- The CI only checked style and tests. Nothing looked for risky code, vulnerable packages
+  or committed secrets, and no Docker image exists yet to scan.
+- A first proposal (three jobs, check → test → scan, linked with `needs:`) was too hard to explain:
+  each job runs on a clean runner, so every job repeated the same setup (download code, install
+  Python, install packages), and the real checks were hidden among the copies.
+
+**Decision**
+- One job, `checks`, with named steps that run top to bottom: CHECK (Ruff) → TEST (pytest) →
+  SCAN (bandit, then Trivy). A failed step stops the steps after it, so the order still works as stages.
+- Scanners:
+  - bandit 1.9.4 (2026-02-25): risky patterns in our own Python code. Tests are excluded because they use `assert` on purpose.
+  - Trivy 0.75.0 (2026-10-01): known vulnerabilities in our packages and secrets in our files, in one tool.
+    The same tool will scan the Docker image after the BUILD stage, so I learn one scanner and use it twice.
+  - Considered pip-audit (packages) + gitleaks (secrets, including Git history). Kept as alternatives.
+    pip-audit depends on `pip` itself, so the lock would need `--allow-unsafe`.
+- Trivy runs from its official image **pinned by digest**, not through `aquasecurity/trivy-action`:
+  - In March 2026, `trivy-action` tags were hijacked and malicious Trivy releases were published
+    (advisory GHSA-69fq-xp46-6x23). The advisory says images referenced by digest were not affected.
+  - Version 0.75.0 because it includes the fix for GHSA-mcj4-mphf-j9ff (fixed in 0.71.1), is about 2 weeks old
+    (release cooldown; 0.76.0 was 1 day old), and is an immutable GitHub release.
+  - Digest `sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa`, the same on
+    ghcr.io and Docker Hub (checked 2026-10-15).
+- Kept: `permissions: contents: read`, `persist-credentials: false`, actions pinned to verified SHAs
+  (`checkout` v7.0.1, `setup-python` v7.0.0, the same as Entry 3), `--only-binary :all: --require-hashes`,
+  `timeout-minutes: 10`.
+- Concurrency changed: `cancel-in-progress` only for `pull_request` events, so a run on `main` is never cancelled.
+- Removed the pip cache to keep the file short.
+- Triggers in PR #4: unchanged (`pull_request` and `push` to `main`).
+- Follow-up (same day): `push` now runs on every branch (`branches: ["**"]`), so CI gives feedback
+  as soon as a branch is pushed, before any PR exists.
+  - Trade-off: once a PR is open, each push starts two runs for the same code (`push` and `pull_request`).
+    They are in different concurrency groups (`refs/heads/<branch>` vs `refs/pull/<n>/merge`), so neither
+    cancels the other. Accepted: a run takes about 30 seconds and the repo is small.
+  - Alternative considered: keep `push` on `main` only and open a draft PR early (the Entry 3 decision).
+
+**Implementation**
+- Branch `ci/simple-pipeline`, PR #4.
+- `api/requirements-dev.in`: added `bandit==1.9.4`; regenerated `api/requirements-dev.txt`
+  (bandit plus pyyaml, stevedore, rich, markdown-it-py, mdurl, all with hashes; other pins unchanged).
+- `.github/workflows/ci.yml`: rewritten as one job with a plain-English comment and a `name:` per step.
+
+**Verification**
+- Before pushing: the YAML parses, and every step has exactly one `uses:` or `run:`.
+- Prediction: green. Result: green.
+- PR #4: CI run `38850082116` green (about 30 seconds), SonarCloud quality gate passed.
+- Merged on 2026-10-16 (squash commit `4337fc3`). Run `38851009996` (`push` to `main`) green.
+- Trivy's log listed only `api/requirements.txt` as a package file.
+
+**Troubleshooting**
+1. *An uncommitted edit would have been lost.*
+   - The planned tidy-up included `git reset --hard origin/main`, which discards uncommitted changes, and
+     `api/requirements-dev.in` had an uncommitted edit.
+   - Fix: `git restore` the file on purpose, tidy up, then redo the edit on the new branch.
+2. *The lock file header showed `--no-index`, which I did not type.*
+   - No pip config or environment variable sets it, and the new packages were still downloaded from PyPI,
+     so it had no effect. Cause not found; only the header comment is affected.
+3. *Trivy scanned `api/requirements.txt` but not `api/requirements-dev.txt`.*
+   - Result: the runtime packages (what will ship in the image) are checked; the dev-only tools
+     (pytest, Ruff, bandit) are not. Acceptable for now, because the dev tools never go into the image.
+4. *Does pushing a feature branch run CI?*
+   - Not by itself. The run for `ci/simple-pipeline` came from the `pull_request` event; there was no `push` run.
+   - In the Entry 3 history, `push` runs on a feature branch did appear, named `.github/workflows/ci.yml`:
+     with an invalid file, GitHub cannot read the `on:` filters or the `name:`.
+
+**Lesson**
+- Simple beats clever when I have to explain it: one job with named steps reads like a checklist.
+- Each job runs on a clean runner. Separate jobs give separate results, but each one has to set itself up again.
+- Anything that can move (a tag, a "latest" image) can be swapped by an attacker. A SHA or a digest cannot.
+- Before choosing a tool's version, I read its security advisories, not just its release list.
+- Before `git reset --hard`, I run `git status`: it throws away uncommitted work without asking.
+
+**Next step**
+- Failure drills for this pipeline (Predict → Break → Observe → Fix → Verify): Ruff, pytest, bandit, Trivy secret.
+- Update `docs/architecture.md` section 9 (it still describes three parallel jobs).
+- Then the BUILD stage: Dockerfile for the api, and a Trivy image scan.

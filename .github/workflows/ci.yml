@@ -3,11 +3,11 @@
 # If a step fails, the steps after it are skipped and the run goes red.
 name: CI
 
-# When to run: on every pull request, and after each merge to main.
+# When to run: on every push to any branch, and on every pull request.
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: ["**"]
 
 # The workflow's token can read the repo but never change it.
 permissions:

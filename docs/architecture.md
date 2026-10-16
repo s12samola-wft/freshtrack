@@ -1,9 +1,10 @@
 # FreshTrack — Architecture
 
-Last updated: 2026-10-09
+Last updated: 2026-10-16
 
 **Status rule:** a part is marked **Built** only when it is merged to `main` and verified.
-Everything else is **Planned**. Today, nothing is built yet.
+Everything else is **Planned**. Built so far: the CI CHECK stage (section 9).
+The api has only `/health` and `/ready` so far, so it is still Planned.
 
 ---
 
@@ -131,37 +132,54 @@ AWS infrastructure is defined in a separate repo, `terraform-aws-platform`.
 - Hardened images: pinned base image digest, hash-locked dependencies, non-root user, small image.
 - NetworkPolicies limit who can talk to whom.
 
-## 9. Delivery pipeline (planned)
+## 9. Delivery pipeline (CHECK built; BUILD to SHIP planned)
 
 **Check → Build → Prove → Scan → Ship.** Like a food factory: inspect the ingredients,
 cook, taste, get QC release, dispatch. Each stage is a gate; a failure stops everything after it.
 
-| # | Stage | Factory version | What it does | What it catches |
-|---|---|---|---|---|
-| 1 | CHECK (3 parallel jobs) | Incoming raw-material inspection | Lint (Ruff), Test (pytest against a real PostgreSQL), Repo scan (Trivy: secrets, vulnerable libraries, misconfiguration) | Messy or broken code, wrong logic or SQL, leaked secrets, vulnerable dependencies, unsafe Dockerfile/K8s settings |
-| 2 | BUILD | Production | Build the Docker image for web, api and expiry-checker side by side | Dockerfile errors, missing dependencies |
-| 3 | PROVE | Taste test on the line | Start the container and call `/health` (the checker runs a dry run) | An image that builds but won't start |
-| 4 | SCAN | QC release testing | Trivy image scan: fail on fixable HIGH/CRITICAL, report everything | Vulnerabilities in the base image and OS packages |
-| 5 | SHIP | Dispatch | Push to Docker Hub tagged with the git SHA, **only on `main`** | (release step) |
+| # | Stage | Factory version | What it does | What it catches | Status |
+|---|---|---|---|---|---|
+| 1 | CHECK | Incoming raw-material inspection | One job, `checks`, with steps in order: lint + format check (Ruff), unit tests (pytest), code scan (bandit), source scan (Trivy `fs`: vulnerable packages + secrets) | Messy or broken code, wrong logic, risky Python patterns, vulnerable runtime packages, committed secrets | **Built** (PR #4, #5) |
+| 2 | BUILD | Production | Build the Docker image for web, api and expiry-checker | Dockerfile errors, missing dependencies | Planned |
+| 3 | PROVE | Taste test on the line | Start the container and call `/health` (the checker runs a dry run) | An image that builds but won't start | Planned |
+| 4 | SCAN | QC release testing | Trivy image scan: fail on fixable HIGH/CRITICAL, report everything | Vulnerabilities in the base image and OS packages | Planned |
+| 5 | SHIP | Dispatch | Push to Docker Hub tagged with the git SHA, **only on `main`** | (release step) | Planned |
 
 ```
-          ┌─ Lint (Ruff)        ─┐
-PR/push → ├─ Test (pytest + DB) ─┼─→ [ Build → Prove → Scan → Ship* ]  × 3 apps (matrix)
-          └─ Repo scan (Trivy)  ─┘        (*Ship only on main)
-SonarCloud runs alongside. It must pass before merge but doesn't block the release path.
+Built today (.github/workflows/ci.yml, one job "checks"):
+
+push (any branch) / PR → Ruff lint → Ruff format → pytest → bandit → Trivy fs
+                          (a failed step stops the steps after it)
+
+Planned after it: Build → Prove → Scan (Trivy image) → Ship* (*Ship only on main)
+SonarCloud runs alongside through Automatic Analysis (its GitHub app, not ci.yml).
+Its quality gate must pass before merge.
 ```
+
+**What the CHECK stage does not cover yet (honest limits)**
+- Tests use no real PostgreSQL yet; the database check is tested against an unreachable address.
+  Tests against a real PostgreSQL are planned with the first SQL code.
+- Trivy `fs` reads `api/requirements.txt` (runtime packages) but not `api/requirements-dev.txt`
+  (pytest, Ruff, bandit). Dev tools never go into the image.
+- Trivy `fs` scans files as they are now, not old commits. Git history secret scanning (gitleaks) is not in place.
+- Misconfiguration scanning (Dockerfile, Kubernetes) is planned once those files exist.
+
+**Triggers:** every push to any branch, and every pull request. Once a PR is open,
+each push runs CI twice (`push` and `pull_request`); accepted because a run takes about 30 seconds.
 
 **Security**
-- Workflow token is read-only by default (`permissions: contents: read`).
+- Workflow token is read-only (`permissions: contents: read`); checkout keeps no Git token (`persist-credentials: false`).
 - Every action is pinned to a full commit SHA, verified against its real release tag.
-- The Docker Hub token is used only in the Ship step, only on `main`. Pull requests never see it.
-- An image is scanned before it is pushed, so a vulnerable image never reaches the registry.
+- Trivy runs from its official image pinned by digest, not through `trivy-action` (its tags were hijacked in March 2026).
+- Python packages install only as wheels and only if their hashes match the lock file
+  (`--only-binary :all: --require-hashes`).
+- (Planned) The Docker Hub token is used only in the Ship step, only on `main`. Pull requests never see it.
+- (Planned) An image is scanned before it is pushed, so a vulnerable image never reaches the registry.
 
-**Speed (target under 2 minutes on a warm cache; to be measured, not assumed)**
-- CHECK jobs run in parallel; the 3 apps build in parallel (matrix).
-- Build → Prove → Scan → Ship run in one job per app, so the image is never passed between jobs.
-- Caches for Python packages, Docker layers and the Trivy database.
-- `concurrency: cancel-in-progress` and `timeout-minutes` on every job.
+**Speed**
+- Today: a CHECK run takes about 30 seconds (measured on PR #4 and #5). No caches are used yet.
+- `timeout-minutes: 10` on the job. `concurrency` cancels outdated pull request runs; runs on `main` are never cancelled.
+- (Planned) How the BUILD to SHIP stages fit (same job or separate jobs per app) is decided at the BUILD stage.
 
 **Limits (what CI does not catch):** logic with no test, wrong settings inside the
 cluster, and runtime failures such as the database being down. Probes, Argo CD and monitoring cover those.
@@ -181,6 +199,8 @@ Alertmanager (alerts). A first useful alert: "the morning reminder Job failed."
 | Source control | Git + GitHub | GitLab |
 | CI/CD | GitHub Actions | GitLab CI, Jenkins |
 | Code quality | Ruff + SonarCloud | SonarQube Community |
+| Python code security scan | bandit | Semgrep |
+| Source scan (packages + secrets) | Trivy `fs` | pip-audit + gitleaks |
 | Image scan | Trivy | Grype |
 | Registry | Docker Hub | Harbor |
 | Local cluster | Minikube | kind |

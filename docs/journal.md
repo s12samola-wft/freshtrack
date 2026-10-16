@@ -219,6 +219,12 @@ automatically stopped broken or messy code from reaching `main`.
 - PR #4: CI run `38850082116` green (about 30 seconds), SonarCloud quality gate passed.
 - Merged on 2026-10-16 (squash commit `4337fc3`). Run `38851009996` (`push` to `main`) green.
 - Trivy's log listed only `api/requirements.txt` as a package file.
+- Follow-up (push on every branch), PR #5:
+  - Predicted 1 run after the push, then 2 in total after opening the PR. Correct.
+  - Run `38852861207`: event `push`, branch `ci/push-all-branches`, before any PR existed. Green.
+  - Run `38852940271`: event `pull_request`, same commit `f57f9bf`. Green.
+  - Merged as `5c3644e`; run `38853010653` (`push` to `main`) green.
+  - Deleting 5 old branches on GitHub started no CI runs.
 
 **Troubleshooting**
 1. *An uncommitted edit would have been lost.*
@@ -231,10 +237,17 @@ automatically stopped broken or messy code from reaching `main`.
 3. *Trivy scanned `api/requirements.txt` but not `api/requirements-dev.txt`.*
    - Result: the runtime packages (what will ship in the image) are checked; the dev-only tools
      (pytest, Ruff, bandit) are not. Acceptable for now, because the dev tools never go into the image.
-4. *Does pushing a feature branch run CI?*
+4. *Does pushing a feature branch run CI? (before the follow-up)*
    - Not by itself. The run for `ci/simple-pipeline` came from the `pull_request` event; there was no `push` run.
    - In the Entry 3 history, `push` runs on a feature branch did appear, named `.github/workflows/ci.yml`:
      with an invalid file, GitHub cannot read the `on:` filters or the `name:`.
+5. *The follow-up commit landed on the already-merged branch, and no PR appeared.*
+   - Why: I committed on `ci/simple-pipeline` (PR #4, already squash-merged). GitHub never opens a PR by itself,
+     and a merged PR does not reopen. That branch was also built on the pre-squash history (`828d024`),
+     not on `main` (`4337fc3`), so a new PR from it would have shown all of PR #4 again.
+   - Fix: a new branch from the latest `main`, then `git cherry-pick d2e42af` to copy only that one commit
+     (the copy got a new ID, `f57f9bf`). After switching to `main`, Entry 4 seemed to vanish from the journal;
+     it was only inside the commit on the other branch.
 
 **Lesson**
 - Simple beats clever when I have to explain it: one job with named steps reads like a checklist.
@@ -242,8 +255,10 @@ automatically stopped broken or messy code from reaching `main`.
 - Anything that can move (a tag, a "latest" image) can be swapped by an attacker. A SHA or a digest cannot.
 - Before choosing a tool's version, I read its security advisories, not just its release list.
 - Before `git reset --hard`, I run `git status`: it throws away uncommitted work without asking.
+- Once a PR is merged, its branch is finished. New work starts on a new branch from the latest `main`.
 
 **Next step**
-- Failure drills for this pipeline (Predict → Break → Observe → Fix → Verify): Ruff, pytest, bandit, Trivy secret.
-- Update `docs/architecture.md` section 9 (it still describes three parallel jobs).
-- Then the BUILD stage: Dockerfile for the api, and a Trivy image scan.
+- Done: `docs/architecture.md` section 9 updated (CHECK stage marked Built).
+- Still owed: failure drills for this pipeline (Predict → Break → Observe → Fix → Verify):
+  Ruff, pytest, bandit, Trivy secret. Deferred so we can start the BUILD stage.
+- Next: the BUILD stage, starting with the Dockerfile for the api.
